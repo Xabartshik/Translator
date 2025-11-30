@@ -698,7 +698,7 @@ public static class LanguageGrammarFactory
             // Разделители
             Delimiters = new HashSet<char>
             {
-                '(', ')', '{', '}', '[', ']', ';', ',', '.', ':', '-'
+                '(', ')', '{', '}', '[', ']', ';', ',', '.', ':'
             }
         };
         return grammar;
@@ -743,7 +743,7 @@ public static class LanguageGrammarFactory
             },
             Delimiters = new HashSet<char>
             {
-                '(', ')', '{', '}', '[', ']', ';', ',', '.', ':', '-'
+                '(', ')', '{', '}', '[', ']', ';', ',', '.', ':'
             }
         };
         return grammar;
