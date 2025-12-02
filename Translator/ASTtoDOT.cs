@@ -6,50 +6,60 @@ using Parser;
 
 namespace FlowchartGen;
 
-///
-/// Генератор Mermaid блок-схем по ГОСТ 19.701-90 (ЕСПД).
-/// Обходит AST и строит диаграмму потока управления в формате Mermaid.
-///
-/// Элементы ГОСТ 19.701-90:
-/// - Овал ([...]) : начало/конец
-/// - Прямоугольник ["..."] : действие, операция
-/// - Параллелограмм [/.../ или \.../] : ввод/вывод данных
-/// - Ромб {...} : проверка условия
-/// - Стрелки с подписями "Да"/"Нет" для развилок
-/// - Ортогональные углы (linear curve) для чёткой геометрии
-///
-public sealed class ASTToMermaid
+/// <summary>
+/// Генератор блок-схем по ГОСТ 19.701-90 (ЕСПД) в формате DOT (Graphviz).
+/// Обходит AST и строит граф потока управления.
+/// </summary>
+public sealed class FlowchartGeneratorGOST
 {
     private int _nodeCounter = 0;
-    private readonly StringBuilder _mermaid = new();
-    private List<string> _pendingNodes = new(); // Узлы, ожидающие подключения
-    private readonly Dictionary<string, int> _decisionEdgeCount = new(); // исходящие рёбра из decision-узлов
+    private readonly StringBuilder _dot = new();
 
-    ///
-    /// Сгенерировать Mermaid-код блок-схемы для заданного AST в соответствии с ГОСТ 19.701-90.
-    /// Использует linear curve (прямые стрелки), ELK renderer, оптимальный spacing.
-    ///
+    /// <summary>
+    /// Сгенерировать DOT-код блок-схемы для заданного AST в соответствии с ГОСТ 19.701-90.
+    /// </summary>
     public string Generate(AstNode? root, string graphName = "Flowchart")
     {
         if (root == null)
-            return "flowchart TD\n    Start([...])";
+            return "digraph G { }";
 
         _nodeCounter = 0;
-        _mermaid.Clear();
-        _pendingNodes.Clear();
-        _decisionEdgeCount.Clear();
+        _dot.Clear();
 
-        // Инициализация с настройками Mermaid
-        _mermaid.AppendLine("%%{init: {'flowchart': {");
-        _mermaid.AppendLine("  'curve': 'linear',");
-        _mermaid.AppendLine("  'nodeSpacing': 80,");
-        _mermaid.AppendLine("  'rankSpacing': 100,");
-        _mermaid.AppendLine("  'diagramPadding': 40,");
-        _mermaid.AppendLine("  'defaultRenderer': 'elk'");
-        _mermaid.AppendLine("}}}%%");
-        _mermaid.AppendLine("flowchart-elk TD");
+        // Заголовок графа
+        _dot.AppendLine($"digraph {graphName} {{");
+        _dot.AppendLine("    rankdir=TB;");
+        _dot.AppendLine();
+        // Общие атрибуты графа.
+        // Используем splines=ortho для прямых углов на стрелках.
+        _dot.AppendLine("    graph [");
+        _dot.AppendLine("        bgcolor=white,");
+        _dot.AppendLine("        splines=ortho,");
+        _dot.AppendLine("        nodesep=0.6,");
+        _dot.AppendLine("        ranksep=0.8,");
+        _dot.AppendLine("        margin=0.5");
+        _dot.AppendLine("    ];");
+        _dot.AppendLine();
+        // Атрибуты узлов.
+        _dot.AppendLine("    node [");
+        _dot.AppendLine("        fontname=\"Arial\",");
+        _dot.AppendLine("        fontsize=10,");
+        _dot.AppendLine("        color=black,");
+        _dot.AppendLine("        style=solid,");
+        _dot.AppendLine("        width=1.0,");
+        _dot.AppendLine("        height=0.6");
+        _dot.AppendLine("    ];");
+        _dot.AppendLine();
+        // Атрибуты рёбер.
+        _dot.AppendLine("    edge [");
+        _dot.AppendLine("        color=black,");
+        _dot.AppendLine("        arrowsize=1.0,");
+        _dot.AppendLine("        fontname=\"Arial\",");
+        _dot.AppendLine("        fontsize=9");
+        _dot.AppendLine("    ];");
+        _dot.AppendLine();
 
-        // Начальный и конечный элементы
+        // Начальный и конечный элементы.
         string startNode = NewNode("Начало", "terminator");
         string lastNode = startNode;
 
@@ -58,20 +68,12 @@ public sealed class ASTToMermaid
         else
             lastNode = ProcessNode(root, startNode);
 
-        // Подключаем все отложенные узлы к концу
-        foreach (var pendingNode in _pendingNodes)
-        {
-            AddEdge(pendingNode, lastNode);
-        }
-        _pendingNodes.Clear();
-
         string endNode = NewNode("Конец", "terminator");
         AddEdge(lastNode, endNode);
 
-        // Добавляем стиль для subgraph
-        _mermaid.AppendLine("\n    classDef loopGroup fill:#1a2a3a,stroke:#4a7c9e,stroke-width:2px,color:#fff;");
+        _dot.AppendLine("}");
 
-        return _mermaid.ToString();
+        return _dot.ToString();
     }
 
     // ================== Общий обход AST ==================
@@ -109,7 +111,7 @@ public sealed class ASTToMermaid
             LiteralNode { Kind: "keyword", Value: "break" } => ProcessBreak(prevNode),
             LiteralNode { Kind: "keyword", Value: "continue" } => ProcessContinue(prevNode),
 
-            // Блок кода — НЕ создаём отдельный узел, а обрабатываем содержимое
+            // Блок кода
             ProgramNode block => ProcessStatements(block.Children, prevNode),
 
             // Оператор-выражение
@@ -125,12 +127,11 @@ public sealed class ASTToMermaid
 
     // ================== if / while / do-while / for ==================
 
-    ///
+    /// <summary>
     /// if (cond) thenBranch else elseBranch
-    /// Условие — ромб (decision).
-    /// ИСПРАВЛЕНО: Возвращаем обе ветки в список _pendingNodes, 
-    /// чтобы следующий узел подключился к обеим сразу.
-    ///
+    /// Условие — ромб (решение).
+    /// БЕЗ промежуточных соединителей — стрелки идут напрямую!
+    /// </summary>
     private string ProcessIf(BinaryNode ifNode, string prevNode)
     {
         string condLabel = GetExpressionLabel(ifNode.Left);
@@ -141,82 +142,69 @@ public sealed class ASTToMermaid
         var thenBranch = branches?.Left;
         var elseBranch = branches?.Right;
 
-        // Проверяем наличие веток
-        bool hasThen = thenBranch != null && thenBranch is not LiteralNode { Kind: "void" };
-        bool hasElse = elseBranch != null && elseBranch is not LiteralNode { Kind: "void" };
+        // Определяем, куда выходит "да" и "нет".
+        string thenTarget = thenBranch != null && thenBranch is not LiteralNode { Kind: "void" }
+            ? ProcessNode(thenBranch, condNode)
+            : null;
 
-        string? thenTarget = null;
-        string? elseTarget = null;
+        string elseTarget = elseBranch != null && elseBranch is not LiteralNode { Kind: "void" }
+            ? ProcessNode(elseBranch, condNode)
+            : null;
 
-        // THEN-ветка
-        if (hasThen)
+        if (thenTarget != null || elseTarget != null)
         {
-            if (thenBranch is ProgramNode thenBlock)
-                thenTarget = ProcessStatements(thenBlock.Children, condNode);
-            else
-                thenTarget = ProcessNode(thenBranch, condNode);
+            if (thenTarget != null)
+                AddEdge(condNode, thenTarget, "да");
+            if (elseTarget != null)
+                AddEdge(condNode, elseTarget, "нет");
+
+            return thenTarget ?? elseTarget ?? condNode;
         }
 
-        // ELSE-ветка
-        if (hasElse)
-        {
-            if (elseBranch is ProgramNode elseBlock)
-                elseTarget = ProcessStatements(elseBlock.Children, condNode);
-            else
-                elseTarget = ProcessNode(elseBranch, condNode);
-        }
-
-        // Оба выхода существуют — объединяем через pending
-        if (hasThen && hasElse && thenTarget != null && elseTarget != null)
-        {
-            _pendingNodes.Add(thenTarget);
-            _pendingNodes.Add(elseTarget);
-            return thenTarget;
-        }
-
-        if (hasThen && thenTarget != null)
-            return thenTarget;
-
-        if (hasElse && elseTarget != null)
-            return elseTarget;
-
+        // Если нет веток — просто идём дальше.
         return condNode;
     }
 
-    ///
+    /// <summary>
     /// while (cond) body
-    /// Условие цикла — ромб (decision).
-    ///
+    /// Условие цикла — шестиугольник.
+    /// БЕЗ промежуточных соединителей.
+    /// </summary>
     private string ProcessWhile(BinaryNode whileNode, string prevNode)
     {
         string condLabel = GetExpressionLabel(whileNode.Left);
-        string condNode = NewNode(condLabel, "decision");
+        string condNode = NewNode(condLabel, "loop-cond");
         AddEdge(prevNode, condNode);
 
         string bodyLast = ProcessNode(whileNode.Right, condNode);
         AddEdge(bodyLast, condNode); // назад к условию
 
+        // Возвращаем сам узел условия как "выход" цикла.
         return condNode;
     }
 
-    ///
+    /// <summary>
     /// do { body } while (cond);
-    ///
+    /// БЕЗ промежуточных соединителей.
+    /// </summary>
     private string ProcessDoWhile(BinaryNode doWhileNode, string prevNode)
     {
         string bodyLast = ProcessNode(doWhileNode.Right, prevNode);
-        string condLabel = GetExpressionLabel(doWhileNode.Left);
-        string condNode = NewNode(condLabel, "decision");
-        AddEdge(bodyLast, condNode);
-        AddEdge(condNode, prevNode, "Да"); // назад к телу (явная метка)
 
+        string condLabel = GetExpressionLabel(doWhileNode.Left);
+        string condNode = NewNode(condLabel, "loop-cond");
+
+        AddEdge(bodyLast, condNode);
+        AddEdge(condNode, prevNode, "да"); // назад к телу
+
+        // Возвращаем условие цикла.
         return condNode;
     }
 
-    ///
+    /// <summary>
     /// for (init; cond; incr) body
-    /// Очищенный вариант: "int i = 1" → "i = 1", "i++post" → "i++"
-    ///
+    /// БЕЗ промежуточных соединителей.
+    /// </summary>
     private string ProcessFor(BinaryNode forNode, string prevNode)
     {
         var header = forNode.Left as BinaryNode; // for-header
@@ -230,24 +218,24 @@ public sealed class ASTToMermaid
         var cond = condIncr?.Left;
         var incr = condIncr?.Right;
 
-        // инициализация — очищаем текст от типа переменной
-        string initLabel = CleanForLabel(GetExpressionLabel(init));
-        string initNode = NewNode(initLabel, "process");
+        // подготовка цикла (инициализация)
+        string initLabel = GetExpressionLabel(init);
+        string initNode = NewNode(initLabel, "loop-cond");
         AddEdge(prevNode, initNode);
 
         // условие цикла
         string condLabel = cond != null ? GetExpressionLabel(cond) : "true";
-        string condNode = NewNode(condLabel, "decision");
+        string condNode = NewNode(condLabel, "loop-cond");
         AddEdge(initNode, condNode);
 
-        // тело цикла
+        // тело цикла — обрабатываем напрямую
         string bodyLast = ProcessNode(body, condNode);
 
-        // изменение параметров — очищаем от постфикса
+        // изменение параметров
         if (incr != null && incr is not LiteralNode { Kind: "void" })
         {
-            string incrLabel = CleanForLabel(GetExpressionLabel(incr));
-            string incrNode = NewNode(incrLabel, "process");
+            string incrLabel = GetExpressionLabel(incr);
+            string incrNode = NewNode(incrLabel, "loop-cond");
             AddEdge(bodyLast, incrNode);
             AddEdge(incrNode, condNode);
         }
@@ -256,6 +244,7 @@ public sealed class ASTToMermaid
             AddEdge(bodyLast, condNode);
         }
 
+        // Возвращаем условие как точку выхода.
         return condNode;
     }
 
@@ -265,29 +254,18 @@ public sealed class ASTToMermaid
     {
         var typeNode = declNode.Left as IdentifierNode;
         var assign = declNode.Right as AssignNode;
-
         if (typeNode == null || assign == null)
             return prevNode;
 
         string varName = GetExpressionLabel(assign.Left);
-        string label = assign.Right is LiteralNode { Kind: "void" }
-            ? $"{typeNode.Name} {varName}"
-            : $"{typeNode.Name} {varName} = {GetExpressionLabel(assign.Right)}";
+        string label =
+            assign.Right is LiteralNode { Kind: "void" }
+                ? $"{typeNode.Name} {varName}"
+                : $"{typeNode.Name} {varName} = {GetExpressionLabel(assign.Right)}";
 
         string shape = IsIoExpression(assign.Right) ? "io" : "process";
         string nodeId = NewNode(label, shape);
-
-        if (_pendingNodes.Count > 0)
-        {
-            foreach (var pending in _pendingNodes)
-                AddEdge(pending, nodeId);
-            _pendingNodes.Clear();
-        }
-        else
-        {
-            AddEdge(prevNode, nodeId);
-        }
-
+        AddEdge(prevNode, nodeId);
         return nodeId;
     }
 
@@ -302,7 +280,7 @@ public sealed class ASTToMermaid
             return prevNode;
 
         string label = $"{retType.Name} {nameNode.Name}()";
-        string funcId = NewNode(label, "process");
+        string funcId = NewNode(label, "predefined-process");
         AddEdge(prevNode, funcId);
 
         if (body != null)
@@ -320,18 +298,7 @@ public sealed class ASTToMermaid
 
         string shape = IsIoExpression(retNode.Operand) ? "io" : "process";
         string nodeId = NewNode(label, shape);
-
-        if (_pendingNodes.Count > 0)
-        {
-            foreach (var pending in _pendingNodes)
-                AddEdge(pending, nodeId);
-            _pendingNodes.Clear();
-        }
-        else
-        {
-            AddEdge(prevNode, nodeId);
-        }
-
+        AddEdge(prevNode, nodeId);
         return nodeId;
     }
 
@@ -363,18 +330,7 @@ public sealed class ASTToMermaid
         string label = $"{varName} {assign.Op} {value}";
         string shape = IsIoExpression(assign) ? "io" : "process";
         string nodeId = NewNode(label, shape);
-
-        if (_pendingNodes.Count > 0)
-        {
-            foreach (var pending in _pendingNodes)
-                AddEdge(pending, nodeId);
-            _pendingNodes.Clear();
-        }
-        else
-        {
-            AddEdge(prevNode, nodeId);
-        }
-
+        AddEdge(prevNode, nodeId);
         return nodeId;
     }
 
@@ -386,53 +342,31 @@ public sealed class ASTToMermaid
 
         string shape = IsIoExpression(expr) ? "io" : "process";
         string nodeId = NewNode(label, shape);
-
-        if (_pendingNodes.Count > 0)
-        {
-            foreach (var pending in _pendingNodes)
-                AddEdge(pending, nodeId);
-            _pendingNodes.Clear();
-        }
-        else
-        {
-            AddEdge(prevNode, nodeId);
-        }
-
+        AddEdge(prevNode, nodeId);
         return nodeId;
     }
 
     // ================== Вспомогательные функции ==================
-
-    ///
-    /// Очищает текст от технических деталей AST для цикла FOR
-    /// Примеры:
-    /// "int decl i = 1" → "i = 1"
-    /// "i++post" → "i++"
-    /// "++iprefix" → "++i"
-    ///
-    private string CleanForLabel(string label)
-    {
-        if (string.IsNullOrWhiteSpace(label))
-            return label;
-
-        // Удаляем "<type> decl " в начале
-        label = System.Text.RegularExpressions.Regex.Replace(label, @"^\w+\s+decl\s+", "");
-
-        // Удаляем служебные суффиксы пост/префиксных операций
-        label = label.Replace("post", "");
-        label = label.Replace("prefix", "");
-
-        return label.Trim();
-    }
 
     private string GetExpressionLabel(AstNode? node)
     {
         if (node == null)
             return string.Empty;
 
+        // Специальная обработка постфиксных инкрементов/декрементов:
+        // BinaryNode("++-post", IdentifierNode("x"), void) → "x ++"
+        if (node is BinaryNode binPost &&
+            (binPost.Op == "++-post" || binPost.Op == "---post") &&
+            binPost.Left is IdentifierNode idNode &&
+            binPost.Right is LiteralNode { Kind: "void" })
+        {
+            string op = binPost.Op.StartsWith("++", StringComparison.Ordinal) ? "++" : "--";
+            return $"{idNode.Name} {op}";
+        }
+
         return node switch
         {
-            IdentifierNode id => id.Name,
+            IdentifierNode identifier => identifier.Name,
             LiteralNode lit => lit.Value,
             BinaryNode bin => $"{GetExpressionLabel(bin.Left)} {bin.Op} {GetExpressionLabel(bin.Right)}",
             UnaryNode un => $"{un.Op}{GetExpressionLabel(un.Operand)}",
@@ -476,21 +410,23 @@ public sealed class ASTToMermaid
     {
         string nodeId = $"n{_nodeCounter++}";
 
-        string shapeAndLabel = type switch
+        string shapeAttr = type switch
         {
-            "terminator" => $"([{EscapeMermaidLabel(label)}])",
-            "process" => $"[\"{EscapeMermaidLabel(label)}\"]",
-            "io" => $"[/{EscapeMermaidLabel(label)}/]",
-            "decision" => $"{{{EscapeMermaidLabel(label)}}}",
-            _ => $"[\"{EscapeMermaidLabel(label)}\"]"
+            "terminator" => "shape=ellipse",
+            "process" => "shape=box",
+            "io" => "shape=parallelogram",
+            "decision" => "shape=diamond",
+            "loop-cond" => "shape=hexagon",
+            "predefined-process" => "shape=component",
+            "document" => "shape=note",
+            _ => "shape=box"
         };
 
-        _mermaid.AppendLine($"    {nodeId}{shapeAndLabel}");
+        string labelAttr = (!string.IsNullOrEmpty(label) && type != "connector")
+            ? $", label=\"{EscapeLabel(label)}\""
+            : ", label=\"\"";
 
-        // регистрируем все decision-узлы для авто "Да"/"Нет"
-        if (type == "decision")
-            _decisionEdgeCount[nodeId] = 0;
-
+        _dot.AppendLine($"    {nodeId} [{shapeAttr}{labelAttr}];");
         return nodeId;
     }
 
@@ -499,37 +435,31 @@ public sealed class ASTToMermaid
         if (string.IsNullOrEmpty(from) || string.IsNullOrEmpty(to))
             return;
 
-        // Если from — decision-узел, считаем исходящие рёбра и,
-        // при отсутствии явной метки, подставляем "Да"/"Нет"
-        if (_decisionEdgeCount.TryGetValue(from, out int count))
+        // Для "да"/"нет" используем taillabel для подписи у начала стрелки.
+        if (label == "да" || label == "нет")
         {
-            if (string.IsNullOrEmpty(label))
-            {
-                label = count == 0 ? "Да" : "Нет";
-            }
-            _decisionEdgeCount[from] = count + 1;
+            string escaped = EscapeLabel(label);
+            string tailPort = label == "да" ? ":e" : ":w";
+            _dot.AppendLine(
+                $"    {from}{tailPort} -> {to} [taillabel=\"{escaped}\", labeldistance=0.3, labelangle=0];");
+            return;
         }
 
+        string attrs = "";
         if (!string.IsNullOrEmpty(label))
-        {
-            _mermaid.AppendLine($"    {from} -->|{EscapeMermaidLabel(label)}| {to}");
-        }
-        else
-        {
-            _mermaid.AppendLine($"    {from} --> {to}");
-        }
+            attrs = $" [taillabel=\"{EscapeLabel(label)}\", labeldistance=0.3, labelangle=0]";
+
+        _dot.AppendLine($"    {from} -> {to}{attrs};");
     }
 
-    private string EscapeMermaidLabel(string text)
+    private string EscapeLabel(string text)
     {
         return text
-            .Replace("\"", "'")
-            .Replace("\n", " ")
-            .Replace("[", "(")
-            .Replace("]", ")")
-            .Replace("{", "(")
-            .Replace("}", ")")
-            .Replace("<", "&lt;")
-            .Replace(">", "&gt;");
+            .Replace("\\", "\\\\")
+            .Replace("\"", "\\\"")
+            .Replace("\n", "\\n")
+            .Replace("&", "&")
+            .Replace("<", "<")
+            .Replace(">", ">");
     }
 }

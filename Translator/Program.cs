@@ -31,12 +31,21 @@ bool Proverka(const string& str) {
 
         // Пример 2: Цикл while с условием
         string sourceCode2 = @"
+#include <iostream>
+using namespace std;
+
 int main() {
-    int x = 10;
-    while (x > 0) {
-        x = x - 1;
+    int x = 0;
+    int n = 10;
+    
+    while (x < n) {
+        if (x % 2 == 0) {
+            cout << x << endl;
+        }
+        x++;
     }
-    return x;
+    
+    return 0;
 }
 ";
 
@@ -103,7 +112,7 @@ int main() {
             }
 
             // 3. Генерация блок-схемы
-            var generator = new ASTToMermaid();
+            var generator = new FlowchartGeneratorGOST();
             string dotCode = generator.Generate(ast, graphName);
 
             // 4. Сохранение в файл
