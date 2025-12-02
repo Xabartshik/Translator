@@ -7,59 +7,47 @@ using Parser;
 namespace FlowchartGen;
 
 /// <summary>
-/// Генератор блок-схем по ГОСТ 19.701-90 (ЕСПД) в формате DOT (Graphviz).
-/// Обходит AST и строит граф потока управления.
+/// Генератор Mermaid блок-схем по ГОСТ 19.701-90 (ЕСПД).
+/// Обходит AST и строит диаграмму потока управления в формате Mermaid.
+///
+/// Элементы ГОСТ 19.701-90:
+/// - Овал ([...]) : начало/конец
+/// - Прямоугольник ["..."] : действие, операция
+/// - Параллелограмм [/.../ или \.../] : ввод/вывод данных
+/// - Ромб {...} : проверка условия
+/// - Стрелки с подписями "Да"/"Нет" для развилок
+/// - Ортогональные углы (linear curve) для чёткой геометрии
 /// </summary>
-public sealed class FlowchartGeneratorGOST
+public sealed class ASTToMermaid
 {
     private int _nodeCounter = 0;
-    private readonly StringBuilder _dot = new();
+    private readonly StringBuilder _mermaid = new();
+    private readonly Dictionary<string, int> _decisionEdgeCount = new(); // исходящие рёбра из decision-узлов
 
     /// <summary>
-    /// Сгенерировать DOT-код блок-схемы для заданного AST в соответствии с ГОСТ 19.701-90.
+    /// Сгенерировать Mermaid-код блок-схемы для заданного AST в соответствии с ГОСТ 19.701-90.
+    /// Использует linear curve (прямые стрелки), ELK renderer, оптимальный spacing.
     /// </summary>
     public string Generate(AstNode? root, string graphName = "Flowchart")
     {
         if (root == null)
-            return "digraph G { }";
+            return "flowchart TD\n    Start([...])";
 
         _nodeCounter = 0;
-        _dot.Clear();
+        _mermaid.Clear();
+        _decisionEdgeCount.Clear();
 
-        // Заголовок графа
-        _dot.AppendLine($"digraph {graphName} {{");
-        _dot.AppendLine("    rankdir=TB;");
-        _dot.AppendLine();
-        // Общие атрибуты графа.
-        // Используем splines=ortho для прямых углов на стрелках.
-        _dot.AppendLine("    graph [");
-        _dot.AppendLine("        bgcolor=white,");
-        _dot.AppendLine("        splines=ortho,");
-        _dot.AppendLine("        nodesep=0.6,");
-        _dot.AppendLine("        ranksep=0.8,");
-        _dot.AppendLine("        margin=0.5");
-        _dot.AppendLine("    ];");
-        _dot.AppendLine();
-        // Атрибуты узлов.
-        _dot.AppendLine("    node [");
-        _dot.AppendLine("        fontname=\"Arial\",");
-        _dot.AppendLine("        fontsize=10,");
-        _dot.AppendLine("        color=black,");
-        _dot.AppendLine("        style=solid,");
-        _dot.AppendLine("        width=1.0,");
-        _dot.AppendLine("        height=0.6");
-        _dot.AppendLine("    ];");
-        _dot.AppendLine();
-        // Атрибуты рёбер.
-        _dot.AppendLine("    edge [");
-        _dot.AppendLine("        color=black,");
-        _dot.AppendLine("        arrowsize=1.0,");
-        _dot.AppendLine("        fontname=\"Arial\",");
-        _dot.AppendLine("        fontsize=9");
-        _dot.AppendLine("    ];");
-        _dot.AppendLine();
+        // Инициализация с настройками Mermaid
+        _mermaid.AppendLine("%%{init: {'flowchart': {");
+        _mermaid.AppendLine("  'curve': 'linear',");
+        _mermaid.AppendLine("  'nodeSpacing': 80,");
+        _mermaid.AppendLine("  'rankSpacing': 100,");
+        _mermaid.AppendLine("  'diagramPadding': 40,");
+        _mermaid.AppendLine("  'defaultRenderer': 'elk'");
+        _mermaid.AppendLine("}}}%%");
+        _mermaid.AppendLine("flowchart TD");
 
-        // Начальный и конечный элементы.
+        // Начальный и конечный элементы
         string startNode = NewNode("Начало", "terminator");
         string lastNode = startNode;
 
@@ -71,9 +59,7 @@ public sealed class FlowchartGeneratorGOST
         string endNode = NewNode("Конец", "terminator");
         AddEdge(lastNode, endNode);
 
-        _dot.AppendLine("}");
-
-        return _dot.ToString();
+        return _mermaid.ToString();
     }
 
     // ================== Общий обход AST ==================
@@ -111,7 +97,7 @@ public sealed class FlowchartGeneratorGOST
             LiteralNode { Kind: "keyword", Value: "break" } => ProcessBreak(prevNode),
             LiteralNode { Kind: "keyword", Value: "continue" } => ProcessContinue(prevNode),
 
-            // Блок кода
+            // Блок кода — НЕ создаём отдельный узел, а обрабатываем содержимое
             ProgramNode block => ProcessStatements(block.Children, prevNode),
 
             // Оператор-выражение
@@ -129,8 +115,7 @@ public sealed class FlowchartGeneratorGOST
 
     /// <summary>
     /// if (cond) thenBranch else elseBranch
-    /// Условие — ромб (решение).
-    /// БЕЗ промежуточных соединителей — стрелки идут напрямую!
+    /// Условие — ромб (decision).
     /// </summary>
     private string ProcessIf(BinaryNode ifNode, string prevNode)
     {
@@ -142,7 +127,7 @@ public sealed class FlowchartGeneratorGOST
         var thenBranch = branches?.Left;
         var elseBranch = branches?.Right;
 
-        // Определяем, куда выходит "да" и "нет".
+        // Определяем, куда выходит "Да" и "Нет".
         string thenTarget = thenBranch != null && thenBranch is not LiteralNode { Kind: "void" }
             ? ProcessNode(thenBranch, condNode)
             : null;
@@ -154,9 +139,9 @@ public sealed class FlowchartGeneratorGOST
         if (thenTarget != null || elseTarget != null)
         {
             if (thenTarget != null)
-                AddEdge(condNode, thenTarget, "да");
+                AddEdge(condNode, thenTarget, "Да");
             if (elseTarget != null)
-                AddEdge(condNode, elseTarget, "нет");
+                AddEdge(condNode, elseTarget, "Нет");
 
             return thenTarget ?? elseTarget ?? condNode;
         }
@@ -167,13 +152,12 @@ public sealed class FlowchartGeneratorGOST
 
     /// <summary>
     /// while (cond) body
-    /// Условие цикла — шестиугольник.
-    /// БЕЗ промежуточных соединителей.
+    /// Условие цикла — ромб (decision).
     /// </summary>
     private string ProcessWhile(BinaryNode whileNode, string prevNode)
     {
         string condLabel = GetExpressionLabel(whileNode.Left);
-        string condNode = NewNode(condLabel, "loop-cond");
+        string condNode = NewNode(condLabel, "decision");
         AddEdge(prevNode, condNode);
 
         string bodyLast = ProcessNode(whileNode.Right, condNode);
@@ -185,17 +169,16 @@ public sealed class FlowchartGeneratorGOST
 
     /// <summary>
     /// do { body } while (cond);
-    /// БЕЗ промежуточных соединителей.
     /// </summary>
     private string ProcessDoWhile(BinaryNode doWhileNode, string prevNode)
     {
         string bodyLast = ProcessNode(doWhileNode.Right, prevNode);
 
         string condLabel = GetExpressionLabel(doWhileNode.Left);
-        string condNode = NewNode(condLabel, "loop-cond");
+        string condNode = NewNode(condLabel, "decision");
 
         AddEdge(bodyLast, condNode);
-        AddEdge(condNode, prevNode, "да"); // назад к телу
+        AddEdge(condNode, prevNode, "Да"); // назад к телу
 
         // Возвращаем условие цикла.
         return condNode;
@@ -203,7 +186,6 @@ public sealed class FlowchartGeneratorGOST
 
     /// <summary>
     /// for (init; cond; incr) body
-    /// БЕЗ промежуточных соединителей.
     /// </summary>
     private string ProcessFor(BinaryNode forNode, string prevNode)
     {
@@ -220,12 +202,12 @@ public sealed class FlowchartGeneratorGOST
 
         // подготовка цикла (инициализация)
         string initLabel = GetExpressionLabel(init);
-        string initNode = NewNode(initLabel, "loop-cond");
+        string initNode = NewNode(initLabel, "process");
         AddEdge(prevNode, initNode);
 
         // условие цикла
         string condLabel = cond != null ? GetExpressionLabel(cond) : "true";
-        string condNode = NewNode(condLabel, "loop-cond");
+        string condNode = NewNode(condLabel, "decision");
         AddEdge(initNode, condNode);
 
         // тело цикла — обрабатываем напрямую
@@ -235,7 +217,7 @@ public sealed class FlowchartGeneratorGOST
         if (incr != null && incr is not LiteralNode { Kind: "void" })
         {
             string incrLabel = GetExpressionLabel(incr);
-            string incrNode = NewNode(incrLabel, "loop-cond");
+            string incrNode = NewNode(incrLabel, "process");
             AddEdge(bodyLast, incrNode);
             AddEdge(incrNode, condNode);
         }
@@ -280,7 +262,7 @@ public sealed class FlowchartGeneratorGOST
             return prevNode;
 
         string label = $"{retType.Name} {nameNode.Name}()";
-        string funcId = NewNode(label, "predefined-process");
+        string funcId = NewNode(label, "process");
         AddEdge(prevNode, funcId);
 
         if (body != null)
@@ -410,23 +392,21 @@ public sealed class FlowchartGeneratorGOST
     {
         string nodeId = $"n{_nodeCounter++}";
 
-        string shapeAttr = type switch
+        string shapeAndLabel = type switch
         {
-            "terminator" => "shape=ellipse",
-            "process" => "shape=box",
-            "io" => "shape=parallelogram",
-            "decision" => "shape=diamond",
-            "loop-cond" => "shape=hexagon",
-            "predefined-process" => "shape=component",
-            "document" => "shape=note",
-            _ => "shape=box"
+            "terminator" => $"([{EscapeMermaidLabel(label)}])",
+            "process" => $"[\"{EscapeMermaidLabel(label)}\"]",
+            "io" => $"[/{EscapeMermaidLabel(label)}/]",
+            "decision" => $"{{{EscapeMermaidLabel(label)}}}",
+            _ => $"[\"{EscapeMermaidLabel(label)}\"]"
         };
 
-        string labelAttr = (!string.IsNullOrEmpty(label) && type != "connector")
-            ? $", label=\"{EscapeLabel(label)}\""
-            : ", label=\"\"";
+        _mermaid.AppendLine($"    {nodeId}{shapeAndLabel}");
 
-        _dot.AppendLine($"    {nodeId} [{shapeAttr}{labelAttr}];");
+        // регистрируем все decision-узлы для авто "Да"/"Нет"
+        if (type == "decision")
+            _decisionEdgeCount[nodeId] = 0;
+
         return nodeId;
     }
 
@@ -435,31 +415,37 @@ public sealed class FlowchartGeneratorGOST
         if (string.IsNullOrEmpty(from) || string.IsNullOrEmpty(to))
             return;
 
-        // Для "да"/"нет" используем taillabel для подписи у начала стрелки.
-        if (label == "да" || label == "нет")
+        // Если from — decision-узел, считаем исходящие рёбра и,
+        // при отсутствии явной метки, подставляем "Да"/"Нет"
+        if (_decisionEdgeCount.TryGetValue(from, out int count))
         {
-            string escaped = EscapeLabel(label);
-            string tailPort = label == "да" ? ":e" : ":w";
-            _dot.AppendLine(
-                $"    {from}{tailPort} -> {to} [taillabel=\"{escaped}\", labeldistance=0.3, labelangle=0];");
-            return;
+            if (string.IsNullOrEmpty(label))
+            {
+                label = count == 0 ? "Да" : "Нет";
+            }
+            _decisionEdgeCount[from] = count + 1;
         }
 
-        string attrs = "";
         if (!string.IsNullOrEmpty(label))
-            attrs = $" [taillabel=\"{EscapeLabel(label)}\", labeldistance=0.3, labelangle=0]";
-
-        _dot.AppendLine($"    {from} -> {to}{attrs};");
+        {
+            _mermaid.AppendLine($"    {from} -->|{EscapeMermaidLabel(label)}| {to}");
+        }
+        else
+        {
+            _mermaid.AppendLine($"    {from} --> {to}");
+        }
     }
 
-    private string EscapeLabel(string text)
+    private string EscapeMermaidLabel(string text)
     {
         return text
-            .Replace("\\", "\\\\")
-            .Replace("\"", "\\\"")
-            .Replace("\n", "\\n")
-            .Replace("&", "&")
-            .Replace("<", "<")
-            .Replace(">", ">");
+            .Replace("\"", "'")
+            .Replace("\n", " ")
+            .Replace("[", "(")
+            .Replace("]", ")")
+            .Replace("{", "(")
+            .Replace("}", ")")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;");
     }
 }

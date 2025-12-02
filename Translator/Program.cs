@@ -112,7 +112,7 @@ int main() {
             }
 
             // 3. Генерация блок-схемы
-            var generator = new FlowchartGeneratorGOST();
+            var generator = new ASTToMermaid();
             string dotCode = generator.Generate(ast, graphName);
 
             // 4. Сохранение в файл
