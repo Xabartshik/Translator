@@ -9,43 +9,43 @@ namespace FlowchartGen;
 /// <summary>
 /// Генератор Mermaid блок-схем по ГОСТ 19.701-90 (ЕСПД).
 /// Обходит AST и строит диаграмму потока управления в формате Mermaid.
-///
-/// Элементы ГОСТ 19.701-90:
-/// - Овал ([...]) : начало/конец
-/// - Прямоугольник ["..."] : действие, операция
-/// - Параллелограмм [/.../ или \.../] : ввод/вывод данных
-/// - Ромб {...} : проверка условия
-/// - Стрелки с подписями "Да"/"Нет" для развилок
-/// - Ортогональные углы (linear curve) для чёткой геометрии
 /// </summary>
 public sealed class ASTToMermaid
 {
     private int _nodeCounter = 0;
     private readonly StringBuilder _mermaid = new();
-    private readonly List<string> _pendingNodes = new();              // хвосты веток, которые нужно слить
+    private readonly List<string> _pendingNodes = new(); // хвосты веток, которые нужно слить
     private readonly Dictionary<string, int> _decisionEdgeCount = new(); // сколько рёбер уже вышло из ромба
 
     /// <summary>
-    /// Сгенерировать Mermaid-код блок-схемы для заданного AST в соответствии с ГОСТ 19.701-90.
-    /// Использует linear curve (прямые стрелки), ELK renderer, оптимальный spacing.
+    /// Контекст цикла: условие и хвосты выхода (для break и ветки "Нет").
     /// </summary>
+    private class LoopContext
+    {
+        public string ConditionNode { get; set; } = string.Empty;
+        public List<string> ExitTails { get; } = new();
+    }
+
+    private readonly Stack<LoopContext> _loopStack = new(); // стек активных циклов для break/continue
+
     public string Generate(AstNode? root, string graphName = "Flowchart")
     {
         if (root == null)
-            return "flowchart TD\n    Start([...])";
+            return "flowchart TD\n Start([...])";
 
         _nodeCounter = 0;
         _mermaid.Clear();
         _pendingNodes.Clear();
         _decisionEdgeCount.Clear();
+        _loopStack.Clear();
 
         // Инициализация с настройками Mermaid
         _mermaid.AppendLine("%%{init: {'flowchart': {");
-        _mermaid.AppendLine("  'curve': 'linear',");
-        _mermaid.AppendLine("  'nodeSpacing': 80,");
-        _mermaid.AppendLine("  'rankSpacing': 100,");
-        _mermaid.AppendLine("  'diagramPadding': 40,");
-        _mermaid.AppendLine("  'defaultRenderer': 'elk'");
+        _mermaid.AppendLine(" 'curve': 'linear',");
+        _mermaid.AppendLine(" 'nodeSpacing': 80,");
+        _mermaid.AppendLine(" 'rankSpacing': 100,");
+        _mermaid.AppendLine(" 'diagramPadding': 40,");
+        _mermaid.AppendLine(" 'defaultRenderer': 'elk'");
         _mermaid.AppendLine("}}}%%");
         _mermaid.AppendLine("flowchart TD");
 
@@ -58,7 +58,7 @@ public sealed class ASTToMermaid
         else
             lastNode = ProcessNode(root, startNode);
 
-        // Если после последнего оператора ещё висят хвосты (после if/else), подключаем их к последнему узлу
+        // Если после последнего оператора ещё висят хвосты (после if/else/циклов), подключаем их к последнему узлу
         foreach (var pending in _pendingNodes)
             AddEdge(pending, lastNode);
         _pendingNodes.Clear();
@@ -120,19 +120,18 @@ public sealed class ASTToMermaid
 
     // ================== if / while / do-while / for ==================
 
-    /// <summary>
-    /// if (cond) thenBranch else elseBranch
-    /// Условие — ромб (decision).
-    ///
-    /// Логика:
-    /// - if с else: хвосты обеих веток добавляются в _pendingNodes;
-    /// - if без else: в _pendingNodes попадают хвост THEN-ветки И сам ромб как ветка "Нет".
-    ///   В следующем операторе это даст два входа: из then-ветки и из условия по "Нет".
-    /// </summary>
     private string ProcessIf(BinaryNode ifNode, string prevNode)
     {
         string condLabel = GetExpressionLabel(ifNode.Left);
         string condNode = NewNode(condLabel, "decision"); // ромб условия
+
+        // Вход в if: сначала из накопленных хвостов, затем из prevNode
+        if (_pendingNodes.Count > 0)
+        {
+            foreach (var p in _pendingNodes)
+                AddEdge(p, condNode);
+            _pendingNodes.Clear();
+        }
         AddEdge(prevNode, condNode);
 
         var branches = ifNode.Right as BinaryNode; // then-else
@@ -145,7 +144,7 @@ public sealed class ASTToMermaid
         string? thenTarget = null;
         string? elseTarget = null;
 
-        // THEN-ветка: строится как обычный код, вход — из condNode
+        // THEN-ветка
         if (hasThen)
         {
             if (thenBranch is ProgramNode thenBlock)
@@ -154,7 +153,7 @@ public sealed class ASTToMermaid
                 thenTarget = ProcessNode(thenBranch, condNode);
         }
 
-        // ELSE-ветка (если есть)
+        // ELSE-ветка
         if (hasElse)
         {
             if (elseBranch is ProgramNode elseBlock)
@@ -163,7 +162,7 @@ public sealed class ASTToMermaid
                 elseTarget = ProcessNode(elseBranch, condNode);
         }
 
-        // if с then и else: обе ветки обязательно должны слиться дальше
+        // if с then и else
         if (hasThen && hasElse && thenTarget != null && elseTarget != null)
         {
             _pendingNodes.Add(thenTarget);
@@ -171,13 +170,11 @@ public sealed class ASTToMermaid
             return thenTarget;
         }
 
-        // if только с THEN-веткой:
-        // - thenTarget — хвост ветки "Да"
-        // - condNode — точка выхода по "Нет" (пропуск тела if)
+        // if только с THEN-веткой
         if (hasThen && thenTarget != null)
         {
-            _pendingNodes.Add(thenTarget);
-            _pendingNodes.Add(condNode);
+            _pendingNodes.Add(thenTarget); // хвост THEN
+            _pendingNodes.Add(condNode);   // ветка "Нет"
             return thenTarget;
         }
 
@@ -189,51 +186,94 @@ public sealed class ASTToMermaid
             return elseTarget;
         }
 
-        // Пустой if (например, синтаксическая заглушка)
+        // Пустой if
         return condNode;
     }
 
-    /// <summary>
-    /// while (cond) body
-    /// Условие цикла — ромб (decision).
-    /// </summary>
     private string ProcessWhile(BinaryNode whileNode, string prevNode)
     {
         string condLabel = GetExpressionLabel(whileNode.Left);
         string condNode = NewNode(condLabel, "decision");
+
+        // Вход в while: из _pendingNodes и из prevNode
+        if (_pendingNodes.Count > 0)
+        {
+            foreach (var p in _pendingNodes)
+                AddEdge(p, condNode);
+            _pendingNodes.Clear();
+        }
         AddEdge(prevNode, condNode);
 
-        string bodyLast = ProcessNode(whileNode.Right, condNode);
-        AddEdge(bodyLast, condNode); // назад к условию
+        var loopCtx = new LoopContext { ConditionNode = condNode };
+        _loopStack.Push(loopCtx);
 
-        // Выход из цикла пойдёт со стрелки из condNode к следующему оператору (ветка "Нет").
-        return condNode;
+        // Тело цикла (ветка "Да")
+        string bodyLast = ProcessNode(whileNode.Right, condNode);
+
+        _loopStack.Pop();
+
+        // Хвосты тела, которые продолжают цикл, возвращаем к условию
+        if (_pendingNodes.Count > 0)
+        {
+            foreach (var p in _pendingNodes)
+                AddEdge(p, condNode);
+            _pendingNodes.Clear();
+        }
+        else if (!string.IsNullOrEmpty(bodyLast))
+        {
+            AddEdge(bodyLast, condNode);
+        }
+
+        // Выход из цикла — ветка "Нет" из condNode (подключим к следующему оператору)
+        loopCtx.ExitTails.Add(condNode);
+
+        // Все выходные хвосты (включая break) передаём дальше
+        foreach (var t in loopCtx.ExitTails)
+            _pendingNodes.Add(t);
+
+        // На верхнем уровне while сам не меняет prevNode (следующий оператор подключится через _pendingNodes)
+        return prevNode;
     }
 
-    /// <summary>
-    /// do { body } while (cond);
-    /// </summary>
     private string ProcessDoWhile(BinaryNode doWhileNode, string prevNode)
     {
-        // сначала тело
+        var loopCtx = new LoopContext();
+        _loopStack.Push(loopCtx);
+
+        // Сначала тело (вход — prevNode)
         string bodyLast = ProcessNode(doWhileNode.Right, prevNode);
 
-        // затем условие
+        // Затем условие
         string condLabel = GetExpressionLabel(doWhileNode.Left);
         string condNode = NewNode(condLabel, "decision");
-        AddEdge(bodyLast, condNode);
+        loopCtx.ConditionNode = condNode;
 
-        // Явная ветка "Да" — возврат к началу тела (prevNode)
+        // Подключаем хвосты тела к условию
+        if (_pendingNodes.Count > 0)
+        {
+            foreach (var p in _pendingNodes)
+                AddEdge(p, condNode);
+            _pendingNodes.Clear();
+        }
+        else if (!string.IsNullOrEmpty(bodyLast))
+        {
+            AddEdge(bodyLast, condNode);
+        }
+
+        _loopStack.Pop();
+
+        // Да — повтор: к началу тела
         AddEdge(condNode, prevNode, "Да");
 
-        // Ветка "Нет" пойдёт из condNode к следующему оператору.
-        return condNode;
+        // Нет — выход (подключим к следующему оператору)
+        loopCtx.ExitTails.Add(condNode);
+
+        foreach (var t in loopCtx.ExitTails)
+            _pendingNodes.Add(t);
+
+        return prevNode;
     }
 
-    /// <summary>
-    /// for (init; cond; incr) body
-    /// Очищенные подписи: "int decl i = 1" → "i = 1", "i++post" → "i++".
-    /// </summary>
     private string ProcessFor(BinaryNode forNode, string prevNode)
     {
         var header = forNode.Left as BinaryNode; // for-header
@@ -247,34 +287,67 @@ public sealed class ASTToMermaid
         var cond = condIncr?.Left;
         var incr = condIncr?.Right;
 
-        // инициализация — очищаем текст от типа и служебных суффиксов
+        // init
         string initLabel = CleanForLabel(GetExpressionLabel(init));
         string initNode = NewNode(initLabel, "process");
+
+        if (_pendingNodes.Count > 0)
+        {
+            foreach (var p in _pendingNodes)
+                AddEdge(p, initNode);
+            _pendingNodes.Clear();
+        }
         AddEdge(prevNode, initNode);
 
-        // условие цикла
+        // condition
         string condLabel = cond != null ? GetExpressionLabel(cond) : "true";
         string condNode = NewNode(condLabel, "decision");
         AddEdge(initNode, condNode);
 
-        // тело цикла
+        var loopCtx = new LoopContext { ConditionNode = condNode };
+        _loopStack.Push(loopCtx);
+
+        // body
         string bodyLast = ProcessNode(body, condNode);
 
-        // изменение параметров — тоже очищаем от служебных суффиксов
+        _loopStack.Pop();
+
+        // increment
         if (incr != null && incr is not LiteralNode { Kind: "void" })
         {
             string incrLabel = CleanForLabel(GetExpressionLabel(incr));
             string incrNode = NewNode(incrLabel, "process");
-            AddEdge(bodyLast, incrNode);
+
+            if (_pendingNodes.Count > 0)
+            {
+                foreach (var p in _pendingNodes)
+                    AddEdge(p, incrNode);
+                _pendingNodes.Clear();
+            }
+            if (!string.IsNullOrEmpty(bodyLast))
+                AddEdge(bodyLast, incrNode);
+
             AddEdge(incrNode, condNode);
         }
         else
         {
-            AddEdge(bodyLast, condNode);
+            if (_pendingNodes.Count > 0)
+            {
+                foreach (var p in _pendingNodes)
+                    AddEdge(p, condNode);
+                _pendingNodes.Clear();
+            }
+            if (!string.IsNullOrEmpty(bodyLast))
+                AddEdge(bodyLast, condNode);
         }
 
-        // Выход из цикла — в следующем операторе из condNode по "Нет".
-        return condNode;
+        // Выход — cond "Нет"
+        loopCtx.ExitTails.Add(condNode);
+
+        foreach (var t in loopCtx.ExitTails)
+            _pendingNodes.Add(t);
+
+        return prevNode;
     }
 
     // ================== Операторы и выражения ==================
@@ -283,19 +356,19 @@ public sealed class ASTToMermaid
     {
         var typeNode = declNode.Left as IdentifierNode;
         var assign = declNode.Right as AssignNode;
+
         if (typeNode == null || assign == null)
             return prevNode;
 
         string varName = GetExpressionLabel(assign.Left);
         string label =
             assign.Right is LiteralNode { Kind: "void" }
-                ? $"{typeNode.Name} {varName}"
-                : $"{typeNode.Name} {varName} = {GetExpressionLabel(assign.Right)}";
+            ? $"{typeNode.Name} {varName}"
+            : $"{typeNode.Name} {varName} = {GetExpressionLabel(assign.Right)}";
 
         string shape = IsIoExpression(assign.Right) ? "io" : "process";
         string nodeId = NewNode(label, shape);
 
-        // Если есть хвосты после if/else — подключаем новый узел ко всем ним
         if (_pendingNodes.Count > 0)
         {
             foreach (var p in _pendingNodes)
@@ -322,12 +395,31 @@ public sealed class ASTToMermaid
 
         string label = $"{retType.Name} {nameNode.Name}()";
         string funcId = NewNode(label, "process");
+
+        // Специальный случай: main — точка входа, должна вести к последнему оператору main
+        if (nameNode.Name == "main")
+        {
+            AddEdge(prevNode, funcId);
+
+            string last = funcId;
+            if (body is ProgramNode mainBlock)
+                last = ProcessStatements(mainBlock.Children, funcId);
+            else if (body != null)
+                last = ProcessNode(body, funcId);
+
+            // Возвращаем последний узел тела main, чтобы "Конец" подключился к return
+            return last;
+        }
+
+        // Остальные функции: рисуем, но основной поток не меняем
         AddEdge(prevNode, funcId);
 
-        if (body != null)
-            return ProcessNode(body, funcId);
+        if (body is ProgramNode funcBlock)
+            ProcessStatements(funcBlock.Children, funcId);
+        else if (body != null)
+            ProcessNode(body, funcId);
 
-        return funcId;
+        return prevNode;
     }
 
     private string ProcessReturn(UnaryNode retNode, string prevNode)
@@ -354,25 +446,86 @@ public sealed class ASTToMermaid
         return nodeId;
     }
 
+    /// <summary>
+    /// break: прерывает цикл и подключается к "следующему после цикла" оператору.
+    /// </summary>
     private string ProcessBreak(string prevNode)
     {
-        string nodeId = NewNode("break", "process");
-        AddEdge(prevNode, nodeId);
-        return nodeId;
+        if (_loopStack.Count == 0)
+        {
+            string nodeId = NewNode("break", "process");
+            AddEdge(prevNode, nodeId);
+            return nodeId;
+        }
+
+        var loopCtx = _loopStack.Peek();
+        string breakNode = NewNode("break", "process");
+        AddEdge(prevNode, breakNode);
+
+        // Сохраняем хвост выхода; подключим после завершения цикла
+        loopCtx.ExitTails.Add(breakNode);
+
+        // Обрываем дальнейшую линейную связь в теле
+        return "";
     }
 
+    /// <summary>
+    /// continue: переходит к проверке условия цикла.
+    /// </summary>
     private string ProcessContinue(string prevNode)
     {
-        string nodeId = NewNode("continue", "process");
-        AddEdge(prevNode, nodeId);
-        return nodeId;
+        if (_loopStack.Count == 0)
+        {
+            string nodeId = NewNode("continue", "process");
+            AddEdge(prevNode, nodeId);
+            return nodeId;
+        }
+
+        var loopCtx = _loopStack.Peek();
+        string continueNode = NewNode("continue", "process");
+        AddEdge(prevNode, continueNode);
+        AddEdge(continueNode, loopCtx.ConditionNode);
+
+        return "";
     }
 
     private string ProcessExpression(AstNode expr, string prevNode)
     {
         if (expr is AssignNode assign)
             return ProcessAssignment(assign, prevNode);
+
+        // Вызов функции
+        if (expr is BinaryNode binNode && binNode.Op == "()")
+            return ProcessFunctionCall(binNode, prevNode);
+
         return ProcessGenericExpression(expr, prevNode);
+    }
+
+    private string ProcessFunctionCall(BinaryNode callNode, string prevNode)
+    {
+        string funcName = GetExpressionLabel(callNode.Left);
+        string argsLabel = callNode.Right is not LiteralNode { Kind: "void" }
+            ? GetExpressionLabel(callNode.Right)
+            : "";
+
+        string label = string.IsNullOrWhiteSpace(argsLabel)
+            ? $"{funcName}()"
+            : $"{funcName}({argsLabel})";
+
+        string nodeId = NewNode(label, "process");
+
+        if (_pendingNodes.Count > 0)
+        {
+            foreach (var p in _pendingNodes)
+                AddEdge(p, nodeId);
+            _pendingNodes.Clear();
+        }
+        else
+        {
+            AddEdge(prevNode, nodeId);
+        }
+
+        return nodeId;
     }
 
     private string ProcessAssignment(AssignNode assign, string prevNode)
@@ -422,24 +575,14 @@ public sealed class ASTToMermaid
 
     // ================== Вспомогательные функции ==================
 
-    /// <summary>
-    /// Очищает текст от технических деталей AST для for:
-    /// "int decl i = 1" → "i = 1"
-    /// "i++post" → "i++"
-    /// "++iprefix" → "++i"
-    /// </summary>
     private string CleanForLabel(string label)
     {
         if (string.IsNullOrWhiteSpace(label))
             return label;
 
-        // Удаляем "<type> decl " в начале
         label = System.Text.RegularExpressions.Regex.Replace(label, @"^\w+\s+decl\s+", "");
-
-        // Удаляем служебные суффиксы пост/префиксных операций
         label = label.Replace("post", "");
         label = label.Replace("prefix", "");
-
         return label.Trim();
     }
 
@@ -448,8 +591,7 @@ public sealed class ASTToMermaid
         if (node == null)
             return string.Empty;
 
-        // Специальная обработка постфиксных инкрементов/декрементов:
-        // BinaryNode("++-post", IdentifierNode("x"), void) → "x ++"
+        // Постфиксные ++/--
         if (node is BinaryNode binPost &&
             (binPost.Op == "++-post" || binPost.Op == "---post") &&
             binPost.Left is IdentifierNode idNode &&
@@ -457,6 +599,14 @@ public sealed class ASTToMermaid
         {
             string op = binPost.Op.StartsWith("++", StringComparison.Ordinal) ? "++" : "--";
             return $"{idNode.Name} {op}";
+        }
+
+        // Вызов функции
+        if (node is BinaryNode funcCall && funcCall.Op == "()")
+        {
+            string funcName = GetExpressionLabel(funcCall.Left);
+            string args = GetExpressionLabel(funcCall.Right);
+            return string.IsNullOrWhiteSpace(args) ? $"{funcName}()" : $"{funcName}({args})";
         }
 
         return node switch
@@ -479,24 +629,18 @@ public sealed class ASTToMermaid
         return node switch
         {
             IdentifierNode id =>
-                id.Name is "cin" or "cout" or "scanf" or "printf" or "ReadLine" or "WriteLine" or "read" or "write",
-
+                id.Name is "cin" or "cout" or "cerr" or "clog" or "scanf" or "printf" or "ReadLine" or "WriteLine" or "read" or "write",
             BinaryNode bin =>
                 bin.Op is ">>" or "<<" ||
                 IsIoExpression(bin.Left) || IsIoExpression(bin.Right),
-
             UnaryNode un =>
                 IsIoExpression(un.Operand),
-
             AssignNode assign =>
                 IsIoExpression(assign.Left) || IsIoExpression(assign.Right),
-
             ExprStatementNode es =>
                 IsIoExpression(es.Expr),
-
             ProgramNode prog =>
                 prog.Children.Any(IsIoExpression),
-
             _ => false
         };
     }
@@ -504,7 +648,6 @@ public sealed class ASTToMermaid
     private string NewNode(string label, string type)
     {
         string nodeId = $"n{_nodeCounter++}";
-
         string shapeAndLabel = type switch
         {
             "terminator" => $"([{EscapeMermaidLabel(label)}])",
@@ -514,9 +657,8 @@ public sealed class ASTToMermaid
             _ => $"[\"{EscapeMermaidLabel(label)}\"]"
         };
 
-        _mermaid.AppendLine($"    {nodeId}{shapeAndLabel}");
+        _mermaid.AppendLine($" {nodeId}{shapeAndLabel}");
 
-        // Регистрируем все ромбы в счётчике исходящих рёбер
         if (type == "decision")
             _decisionEdgeCount[nodeId] = 0;
 
@@ -528,8 +670,7 @@ public sealed class ASTToMermaid
         if (string.IsNullOrEmpty(from) || string.IsNullOrEmpty(to))
             return;
 
-        // Для ромбов: если метка явная — используем её,
-        // если метка пустая — автоматически ставим "Да" для первого выхода и "Нет" для второго.
+        // Для ромба: авто-метки "Да"/"Нет", если метка не указана
         if (_decisionEdgeCount.TryGetValue(from, out int count))
         {
             if (string.IsNullOrEmpty(label))
@@ -540,20 +681,16 @@ public sealed class ASTToMermaid
         }
 
         if (!string.IsNullOrEmpty(label))
-        {
-            _mermaid.AppendLine($"    {from} -->|{EscapeMermaidLabel(label)}| {to}");
-        }
+            _mermaid.AppendLine($" {from} -->|{EscapeMermaidLabel(label)}| {to}");
         else
-        {
-            _mermaid.AppendLine($"    {from} --> {to}");
-        }
+            _mermaid.AppendLine($" {from} --> {to}");
     }
 
     private string EscapeMermaidLabel(string text)
     {
         return text
             .Replace("\"", "'")
-            .Replace("\n", " ")
+            .Replace("\\n", " ")
             .Replace("[", "(")
             .Replace("]", ")")
             .Replace("{", "(")

@@ -53,35 +53,51 @@ int main() {
 
         // Пример 3: Условный оператор if-else
         string sourceCode3 = @"
+// break и continue
+#include <iostream>
+using namespace std;
+
 int main() {
-    int a = 5;
-    int b = 10;
-    int max;
-
-    if (a > b) {
-        max = a;
-    } else {
-        max = b;
+    int i;
+    i = 0;
+    while (i < 10) {
+        if (i == 3) {
+            i = i + 1;
+            continue;
+        }
+        if (i == 7) {
+            break;
+        }
+        cout << i << endl;
+        i = i + 1;
     }
-
-    return max;
+    return 0;
 }
 ";
 
-        GenerateFlowchart(sourceCode3, "IfElse_Example", "if_else.dot");
+        GenerateFlowchart(sourceCode3, "test_break_continue", "test_break_continue.dot");
 
         // Пример 4: Цикл for
         string sourceCode4 = @"
+// Функция и вызов
+#include <iostream>
+using namespace std;
+
+int square(int x) {
+    return x * x;
+}
+
 int main() {
-    int sum = 0;
-    for (int i = 1; i <= 10; i++) {
-        sum = sum + i;
-    }
-    return sum;
+    int n;
+    n = 5;
+    int result;
+    result = square(n);
+    cout << result << endl;
+    return 0;
 }
 ";
 
-        GenerateFlowchart(sourceCode4, "For_Loop", "for_loop.dot");
+        GenerateFlowchart(sourceCode4, "func", "func.dot");
 
         Console.WriteLine("\n✅ Все блок-схемы успешно сгенерированы!");
         Console.WriteLine("\nДля создания изображений выполните:");
